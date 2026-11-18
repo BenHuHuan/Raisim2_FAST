@@ -18,8 +18,29 @@ if(POLICY CMP0177)
     cmake_policy(SET CMP0177 NEW)
 endif()
 
-# find the various packages
-find_package(Eigen3 REQUIRED)
+# find the various packages (C++20 WrenchSensor.hpp requires Eigen >= 3.4)
+find_package(Eigen3 3.4 QUIET NO_MODULE)
+if(NOT Eigen3_FOUND)
+    find_package(Eigen3 QUIET)
+    if(NOT Eigen3_FOUND OR "${Eigen3_VERSION}" VERSION_LESS "3.4")
+        message(STATUS "System Eigen3 >= 3.4 not found; fetching header-only Eigen 3.4.0 for C++20 sensor compatibility.")
+        include(FetchContent)
+        FetchContent_Declare(
+            eigen3_headers
+            URL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_Populate(eigen3_headers)
+        set(EIGEN3_INCLUDE_DIRS "${eigen3_headers_SOURCE_DIR}")
+        if(NOT TARGET Eigen3::Eigen)
+            add_library(Eigen3::Eigen INTERFACE IMPORTED)
+            set_target_properties(Eigen3::Eigen PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${EIGEN3_INCLUDE_DIRS}")
+        endif()
+    endif()
+endif()
+if(NOT DEFINED EIGEN3_INCLUDE_DIRS AND TARGET Eigen3::Eigen)
+    get_target_property(EIGEN3_INCLUDE_DIRS Eigen3::Eigen INTERFACE_INCLUDE_DIRECTORIES)
+endif()
 find_package(raisim CONFIG REQUIRED)
 if (CMAKE_VERSION VERSION_LESS 3.18)
     set(RAISIM_PY_PYTHON_DEV_COMPONENT Development)
@@ -35,6 +56,7 @@ endif()
 # Newer packages expose force/tactile sensors; the 2.12 package does not.
 include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_LIBRARIES raisim::raisim)
+set(CMAKE_REQUIRED_INCLUDES ${EIGEN3_INCLUDE_DIRS})
 unset(RAISIMPY_HAS_WRENCH_SENSORS CACHE)
 check_cxx_source_compiles("
     #include <raisim/sensors/ForceSensor.hpp>
@@ -55,6 +77,7 @@ check_cxx_source_compiles("
                raisim::Sensor::Type::SEGMENTATION != raisim::Sensor::Type::SEGMENTATION;
     }" RAISIMPY_HAS_SEGMENTATION)
 unset(CMAKE_REQUIRED_LIBRARIES)
+unset(CMAKE_REQUIRED_INCLUDES)
 
 # source files
 file(GLOB SOURCES CONFIGURE_DEPENDS "src/*.cpp")
@@ -68,7 +91,7 @@ if(UNIX)
         set(_raisimpy_origin "$ORIGIN")
     endif()
     set_target_properties(raisimpy PROPERTIES
-        INSTALL_RPATH "${_raisimpy_origin};$<TARGET_FILE_DIR:raisim::raisim>")
+        INSTALL_RPATH "${_raisimpy_origin};$<TARGET_FILE_DIR:raisim::raisim>;$<TARGET_FILE_DIR:raisim::raisim>/openusd")
 endif()
 target_compile_definitions(raisimpy PRIVATE
     RAISIMPY_VERSION="${raisim_VERSION}"

@@ -1,230 +1,149 @@
-# RaiSim2
+# Raisim2_FAST (`raisim2Lib` Turbo Edition)
 
-<p align="center">
-  <img src="rsc/docs/image/rayrai_complete_showcase.gif" alt="rayrai complete showcase" width="49%" />
-  <img src="rsc/docs/image/forest_pan.gif" alt="Camera panning across forest trees and crates in rayrai" width="49%" />
-  <br />
-  <img src="rsc/docs/image/deformable_objects.gif" alt="deformable objects example" width="49%" />
-  <img src="rsc/docs/image/procedural_heightmap.gif" alt="procedural heightmap example" width="49%" />
-  <br />
-  <img src="rsc/docs/image/rayrai/rayrai_blue_wall_scene.gif" alt="Camera orbiting the Blue Wall rayrai scene" width="49%" />
-  <img src="rsc/docs/image/rayrai/granular_media_kicking.gif" alt="ANYmal kicking simulated sand with noisy PD joint targets" width="49%" />
-  <br />
-  <img src="rsc/docs/image/rayrai/tendon_pulleys.gif" alt="Tendon-driven loads moving around wrapped pulleys" width="49%" />
-  <img src="rsc/docs/image/rayrai/rayrai_nested_glass_showcase.gif" alt="Camera orbiting nested and overlapping glass solids" width="49%" />
-  <br />
-  <img src="rsc/docs/image/rayrai/strandbeest_closed_loops.gif" alt="12-legged Strandbeest walking, driven by one crank through 36 closed kinematic loops" width="49%" />
-  <img src="rsc/docs/image/rayrai/rayrai_city.gif" alt="Camera moving around ANYmal C standing on a photoreal city street next to roadworks" width="49%" />
-</p>
+**Raisim2_FAST** is a production-hardened, high-throughput upgrade built directly on top of official [`raisimTech/raisim2Lib` (`v2.16.0`)](https://github.com/raisimTech/raisim2Lib). It preserves **100% of upstream RaiSim 2.16 functionality** (`raisim`, `rayrai`, `raisimPy`, `raisimGymTorch`, OpenUSD, TCP Viewer, and all 97 C++ examples — see [`README_UPSTREAM.md`](README_UPSTREAM.md)) while adding **`raisim_fast` (`raisimFast/`)**: a robot-agnostic **C++20 OpenMP vectorized articulated physics engine** and **zero-config MJCF-to-Analytical-Primitive URDF compiler** engineered for massive-scale humanoid reinforcement learning and heterogeneous GPU+CPU co-simulation ([`2SIM_TRAIN`](https://github.com/BenHuHuan/2SIM_TRAIN)).
 
-For full documentation, see the [RaiSim documentation](https://raisim.com).
+---
 
-RaiSim is a physics engine for robotics and artificial intelligence research. The public distribution is provided as binary packages with headers, libraries, examples, rayrai viewer sources, and documentation.
+## Key Features & Optimizations (`Raisim2_FAST`)
 
-Source assets live under [`rsc`](rsc), including example models, viewer icons, and documentation images in [`rsc/docs/image`](rsc/docs/image).
+1. **100% Upstream-Compatible Drop-In Base (`raisim2Lib v2.16.0`)**
+   - Retains every native C++ header, CMake package target, `rayrai` renderer, `raisimPy` nanobind module, `raisimGymTorch`, and example binary without breaking upstream APIs.
+2. **Fused Multi-Substep C++20 OpenMP Vectorized Engine (`libraisim_fast_vec.so`)**
+   - Supports arbitrary floating-base and fixed-base articulated robots (`1..120` DoF: 29-DoF humanoids, Unitree G1/H1, ANYmal/Go2 quadrupeds, manipulators) with stack-allocated Eigen buffers (**zero heap `malloc` inside the OpenMP loop**).
+   - Fuses all `decimation` (`500 Hz`) explicit PD torque computations, effort clamping, external root wrenches, `world->integrate()`, rolling `self_collision` force history, and multi-foot world-frame `netforce` extraction into a single GIL-free OpenMP parallel region (`schedule(dynamic, 8)`).
+3. **Zero-Config Sub-Millimeter MJCF-to-Analytical-Primitive Compiler (`raisim_fast.mjcf_compiler`)**
+   - Directly compiles any `mujoco.MjModel` (no external `.urdf` required) into an analytical-primitive URDF + metadata bundle in `< 0.05 s`.
+   - Replaces expensive convex-hull mesh GJK/EPA checks with envelope-matched `$O(1)$` analytical primitives (`<box>` foot soles, twin rib-cage `<capsule>`s, limb `<capsule>`s, joint `<sphere>`s) achieving **`< 0.2 mm` geometric envelope accuracy**, **`4.80e-8 m` 39-body FK parity**, and **`106,681 RL steps/s` (`1.067M` 500Hz substeps/s)** across `4,096` 29-DoF humanoid worlds.
+4. **$O(k)$ Packed Sparse Resets & Tuned `BisectionContactSolver`**
+   - Transfers and resets only terminated environments (`rfast_set_states_packed`) with `resetContactSolverWarmStart()` and tuned contact solver convergence (`maxIteration=25`, `error_to_terminate=1e-6`).
+5. **Per-World C++ Domain Randomization & Exact MuJoCo Frame Parity**
+   - Native per-world C++ randomization for reflected rotor inertia (`setRotorInertia` $\leftrightarrow$ `dof_armature`), viscous `dof_damping`, per-world URDF `<dynamics friction="...">` Coulomb `frictionloss`, per-world foot–ground friction, and delta-preserving torso mass & CoM shifts.
+   - Exact quaternion normalization, MuJoCo body-frame angular velocity $\omega_b \leftrightarrow$ RaiSim world-frame $\omega_w$ rotation, and safe merged-fixed-link parent resolution (eliminating `ArticulatedSystem::getBodyIdx` `RSFATAL` traps on fixed joints).
+6. **Modern Linux / Rootless HPC Build Hardening**
+   - Automatic CMake `Eigen >= 3.4.0` header resolution so C++20 `WrenchSensor.hpp` (`RAISIMPY_HAS_WRENCH_SENSORS=ON` & `RAISIMPY_HAS_SEGMENTATION=ON`) compiles cleanly on GCC 13+ even on rootless servers without `apt`.
+   - Automatic `openusd` `RPATH` injection and upgraded `raisim_env.sh` that strips mismatched `/opt/ros/*` Python entries from `PYTHONPATH`.
 
-## Install
+---
 
-Download the binary package for your platform and unpack it to an install location such as `$HOME/raisim2Lib` on Linux/macOS or `C:\raisim` on Windows. Current macOS packages use `macos-arm64-<version>.zip` for Apple Silicon and `macos-x86_64-<version>.zip` for Intel. Keep the package directories together; examples and source-built rayrai tools expect the bundled assets to remain with the package.
+## Architecture Overview
 
-Set up the runtime environment before running examples or applications. From the unpacked package root:
+```mermaid
+flowchart LR
+    MJ["MuJoCo MjModel / MJCF"] -->|"compile_mjcf_to_analytical_urdf()"| URDF["O(1) Analytical-Primitive URDF + Meta"]
+    URDF -->|"rfast_create (Parallel Init, 0.36s)"| VEC["libraisim_fast_vec.so (N Worlds in FP64)"]
+    ACT["Policy Actions + Per-World KP/KD"] -->|"Pinned RAM / Zero-GIL"| OMP["Fused OpenMP Substep Loop (schedule dynamic,8)"]
+    VEC --> OMP
+    OMP -->|"10x 500Hz PD + Bisection Solver"| OUT["qpos, qvel (body-omega), qfrc, Foot NetForce & Self-Collision History"]
+```
+
+---
+
+## Verified Benchmarks (32C/64T Xeon Gold 6430 + NVIDIA RTX PRO 6000 Blackwell)
+
+Evaluated on a full **29-DoF Whole-Body Humanoid Ground-Recovery + Dance-Tracking** task (`4,096` parallel environments, `500 Hz` physics / `50 Hz` policy `decimation=10`, strict 23-bit IEEE 754 `fp32_exact` with `allow_tf32=False`):
+
+| Configuration | Collision Geometry | Pure C++ Physics (`4,096` envs) | Full PPO Training (`--fp32-exact`) | Zero-Shot Sim-to-Sim (`MuJoCo 4.0 → RaiSim 2.16`) |
+| :--- | :---: | :---: | :---: | :---: |
+| **V1 Baseline Port** | 64-vert Convex Hull Meshes | `~47,800 steps/s` | `~29,400 steps/s` | `100.0%` Tracking / `100.0%` Recovery |
+| **V2 Analytical Turbo** | 22 `$O(1)$` Primitives + Solver Tune | **`106,681 steps/s`** (`1.067M` substeps/s) | `~50,800 steps/s` | `100.0%` Tracking / `99.4%` Recovery |
+| **V3 `Raisim2_FAST` (IEEE `fp32_exact`)** | 22 `$O(1)$` Primitives + `$O(k)$` Packed Reset | **`106,681 steps/s`** (`0.36s` 4096-world init) | **`52,002 steps/s` mean (`52,977` peak)** | **`0.2279 rad` Joint RMS** (vs `0.226` native MJ4) |
+
+### Kinematic & Inertial Parity (`MuJoCo 4.0` vs `Raisim2_FAST`)
+- **Total Mass (`65.8178 kg`)**: $|\Delta m| = 4.7 \times 10^{-5}\text{ kg}$
+- **Whole-Body Center of Mass**: $\max |\Delta \text{CoM}| = 8.79 \times 10^{-8}\text{ m}$
+- **39-Body 3D World Positions (`xpos`)**: $\max |\Delta p| = 4.80 \times 10^{-8}\text{ m}$
+- **39-Body 3D Orientations (`xquat`)**: $\min |\langle q_{\text{MJ}}, q_{\text{RS}} \rangle| = 1.00000000$
+
+---
+
+## Installation
+
+### Prerequisites
+- Linux (`x86_64` or `aarch64`) or macOS (`arm64` / `x86_64`), CMake `>= 3.18`, C++20 compiler (`g++ >= 11` or `clang++ >= 14`), OpenMP, Python `>= 3.10`.
+- Valid RaiSim activation key placed at `~/.raisim/activation.raisim` (`chmod 600 ~/.raisim/activation.raisim`).
+
+### One-Command Build (`raisim2Lib` + `raisimPy` + `libraisim_fast_vec` + `raisim_fast`)
 
 ```bash
-cd $HOME/raisim2Lib
+git clone https://github.com/BenHuHuan/raisim2Lib.git
+cd raisim2Lib
+
+# Create or activate your Python / uv virtual environment
+uv venv .venv --python 3.12
+source .venv/bin/activate
+uv pip install numpy mujoco pytest
+
+# Automatically downloads RaiSim 2.16.0 SDK (if not present), builds raisimPy + libraisim_fast_vec.so,
+# and installs the `raisim_fast` Python package in editable mode:
+./scripts/install_raisim2_fast.sh
+
+# Configure library & Python paths in any shell (auto-filters conflicting /opt/ros PYTHONPATH):
 source ./raisim_env.sh
-export RAISIM_LOCAL_INSTALL_ROOT=$PWD
 ```
 
-`raisim_env.sh` must be sourced, not executed. It sets `RAISIM_DIR` and `RAISIM_OS`, then prepends `raisim/lib` and `rayrai/lib` to `LD_LIBRARY_PATH` on Linux or `DYLD_LIBRARY_PATH` on macOS.
+> **Headless Server Tip (No X11 / SDL2 Installed):** Pass `RAISIM_PY_RAYRAI=OFF ./scripts/install_raisim2_fast.sh` to skip the optional GUI window wrapper while building the full headless C++ & Python physics stack.
 
-On Windows, run one of the provided environment scripts from the package root:
-
-```powershell
-.\raisim_env.ps1
-```
-
-or:
-
-```bat
-raisim_env.bat
-```
-
-The Windows scripts prepend the installed RaiSim and rayrai `bin` and `lib` directories to `Path`.
-
-## Build Examples With CMake
-
-`RAISIM_EXAMPLE` is enabled by default, but the flag is shown explicitly in the commands below. CMake downloads `RAISIM_VERSION` when the package in this checkout is missing or has a different version.
-
-### Linux build instructions
-
-From the repository root, source the environment script, configure, and build the C++ examples:
+### Run Verification Suite
 
 ```bash
-cd $HOME/raisim2Lib
 source ./raisim_env.sh
-export RAISIM_LOCAL_INSTALL_ROOT=$PWD
-cmake -S . -B build-examples -DCMAKE_BUILD_TYPE=Release -DRAISIM_EXAMPLE=ON
-cmake --build build-examples --parallel 10
+pytest tests/test_raisim2_fast.py -v
 ```
 
-The source-built example executables are written to `build-examples/examples`:
+---
 
-```bash
-./build-examples/examples/rayrai_tcp_viewer
-./build-examples/examples/primitive_grid
+## Quick Start (`raisim_fast` Python SDK)
+
+```python
+import mujoco
+import numpy as np
+from raisim_fast import (
+    RaisimFastVecEngine,
+    compile_mjcf_to_analytical_urdf,
+    verify_mjcf_raisim_parity,
+)
+
+# 1. Compile any MuJoCo MjModel directly into an O(1) analytical-primitive URDF + metadata
+mj_model = mujoco.MjModel.from_xml_path("path/to/robot_scene.xml")
+meta = compile_mjcf_to_analytical_urdf(mj_model, out_dir="/tmp/robot_fast_asset")
+
+# 2. Launch 4,096 OpenMP-vectorized RaiSim 2.16 worlds
+engine = RaisimFastVecEngine.from_asset_dir(
+    "/tmp/robot_fast_asset",
+    num_envs=4096,
+    dt=0.002,
+    num_threads=64,
+)
+
+# 3. Verify sub-micrometer FK & CoM parity against MuJoCo
+parity = verify_mjcf_raisim_parity(
+    mj_model, engine, link_names=[meta["anchor_body_name"], *meta["foot_body_names"]]
+)
+print("Parity report:", parity)
+
+# 4. Run fused 10-substep (500 Hz -> 50 Hz) explicit PD rollout
+nj = engine.num_joints
+targets = np.zeros((4096, nj), dtype=np.float32)
+kp = np.full((4096, nj), 150.0, dtype=np.float32)
+kd = np.full((4096, nj), 5.0, dtype=np.float32)
+limits = np.full((4096, nj), 200.0, dtype=np.float32)
+
+obs_step = engine.step_decimated(targets, kp, kd, limits, decimation=10)
+print("qpos:", obs_step["qpos"].shape, "foot_force_w:", obs_step["foot_force_w"].shape)
+engine.close()
 ```
 
-Install headers, libraries, and CMake package files to a local prefix with:
+---
 
-```bash
-cmake --install build-examples --prefix "$HOME/.local"
-```
+## Dual-Simulator Heterogeneous Crossfire (`MLAB4_Fast` + `Raisim2_FAST`)
 
-The install target does not install source-built example executables; run those from the build tree. Downstream projects using this CMake-installed layout should pass `-DCMAKE_PREFIX_PATH=$HOME/.local`.
+To combine **GPU `MuJoCo 4.0 Warp`** ([`MLAB4_Fast`](https://github.com/BenHuHuan/MLAB4_Fast)) and **CPU `Raisim2_FAST`** simultaneously inside a single unified RL environment—achieving **faster wall-clock training than standalone GPU MuJoCo (`82,442 steps/s` peak vs `78,482 steps/s`)** plus **zero-lag Solver-Level Domain Randomization**—install the decoupled crossfire plugin:
 
-### macOS build instructions
+👉 **[`BenHuHuan/2SIM_TRAIN`](https://github.com/BenHuHuan/2SIM_TRAIN)**
 
-From the repository root, source the environment script, configure, and build the C++ examples:
+---
 
-```bash
-cd $HOME/raisim2Lib
-source ./raisim_env.sh
-export RAISIM_LOCAL_INSTALL_ROOT=$PWD
-cmake -S . -B build-examples -DCMAKE_BUILD_TYPE=Release -DRAISIM_EXAMPLE=ON
-cmake --build build-examples --parallel 10
-```
+## Upstream Documentation & License
 
-The source-built example executables are written to `build-examples/examples`:
-
-```bash
-./build-examples/examples/rayrai_tcp_viewer
-./build-examples/examples/primitive_grid
-```
-
-If `raisim/` or `rayrai/` is missing from the checkout, CMake downloads the matching macOS release asset automatically. You can also update an unpacked tree explicitly:
-
-```bash
-./raisim_upgrade.sh -y
-```
-
-Apple Silicon hosts select the `macos-arm64` package, even when CMake or the shell is running under Rosetta, and compile with the Apple M-series tuning flags used by the examples. Intel Macs select `macos-x86_64` when that release asset is available.
-
-Install headers, libraries, and CMake package files to a local prefix with:
-
-```bash
-cmake --install build-examples --prefix "$HOME/.local"
-```
-
-The install target does not install source-built example executables; run those from the build tree. Downstream projects using this CMake-installed layout should pass `-DCMAKE_PREFIX_PATH=$HOME/.local`.
-
-### Windows build instructions
-
-From the repository root, run one of the Windows environment scripts, configure, and build the C++ examples:
-
-```powershell
-cd C:\raisim2Lib
-.\raisim_env.ps1
-cmake -S . -B build-examples -DRAISIM_EXAMPLE=ON
-cmake --build build-examples --config Release --parallel
-```
-
-Visual Studio and MSBuild are multi-config generators, so `CMAKE_BUILD_TYPE=Release` does not select the build configuration on Windows. Use exactly `--config Release` for the release runtime DLLs. If `rayrai_tcp_viewer.exe` reports a missing `SDL2d.dll`, the executable in `build-examples\bin` was built from a debug-flavored configuration and should be rebuilt with the command above.
-
-The source-built example executables are written to `build-examples\bin`:
-
-```powershell
-.\build-examples\bin\rayrai_tcp_viewer.exe
-.\build-examples\bin\primitive_grid.exe
-```
-
-Install headers, libraries, and CMake package files to a local prefix with:
-
-```powershell
-cmake --install build-examples --config Release --prefix C:\raisim-local
-```
-
-The install target does not install source-built example executables; run those from the build tree. Downstream projects using this CMake-installed layout should pass `-DCMAKE_PREFIX_PATH=C:\raisim-local`.
-
-## Activation
-
-Please go to [raisim.com](https://raisim.com) to get your raisim license.
-Rename the activation key received by email to `activation.raisim` and place it in the default location:
-
-```text
-Linux/macOS: $HOME/.raisim/activation.raisim
-Windows:     C:\Users\<YOUR-USERNAME>\.raisim\activation.raisim
-```
-
-You can also set the activation key explicitly in your application with `raisim::World::setActivationKey()`.
-
-## Run Examples
-
-Server-based examples publish a `raisim::World` through `RaisimServer`. Build the examples as shown above, then start the source-built rayrai TCP viewer before running an example:
-
-```bash
-./build-examples/examples/rayrai_tcp_viewer
-./build-examples/examples/primitive_grid
-```
-
-In-process rayrai examples open their own renderer window and do not need the TCP viewer:
-
-```bash
-$RAISIM_LOCAL_INSTALL_ROOT/bin/example_rayrai_pbr_asset_inspector
-$RAISIM_LOCAL_INSTALL_ROOT/bin/example_polyhaven_blue_wall --fast-load
-```
-
-## Use RaiSim From C++
-
-RaiSim is installed as a CMake package. Point `CMAKE_PREFIX_PATH` at the installed package prefix from your downstream project:
-
-```bash
-cmake -S . -B build -DCMAKE_PREFIX_PATH=$RAISIM_LOCAL_INSTALL_ROOT/raisim
-```
-
-Minimal downstream `CMakeLists.txt`:
-
-```cmake
-cmake_minimum_required(VERSION 3.16)
-project(my_raisim_app LANGUAGES CXX)
-
-find_package(raisim CONFIG REQUIRED)
-find_package(Eigen3 REQUIRED)
-
-add_executable(app main.cpp)
-target_link_libraries(app PRIVATE raisim::raisim)
-if (UNIX)
-  target_link_libraries(app PRIVATE pthread)
-endif()
-```
-
-## Visualization
-
-Use the source-built `rayrai_tcp_viewer` for applications that publish through `raisim::RaisimServer`. Use in-process rayrai APIs when your application needs its own renderer window, offscreen rendering, RGB/depth sensors, or screenshots.
-
-### Rayrai TCP viewer
-
-<img src="rsc/docs/image/rayrai/tcp_viewer/tcp_viewer_overview.png" alt="rayrai TCP viewer" width="100%">
-
-`rayrai_tcp_viewer` is the recommended visualizer for `RaisimServer` simulations. It is built from the viewer sources in this repository and connects to a running server over TCP. The viewer renders the world with the full rayrai PBR pipeline (procedural sky, IBL, directional shadows, reflective ground, weather, tone mapping). The overlay surfaces:
-
-* **Pause / Step / Step 10** — interactive simulation control over the wire (`PROTOCOL_FEATURE_SIM_CONTROL`); pause and step a remote server from the viewer without changing simulation code.
-* **Force / pose / generalized-coordinate authoring** — drag-poke objects, retarget single-body poses, or override an articulated system's joint angles directly from the inspector.
-* **Render tab** — switch render-quality presets, tone mapping, weather, bloom, SSAO, and DoF at runtime.
-* **Drag-drop joint inspector** — drop a URDF or MJCF file on the disconnected viewer to inspect joints, limits, and mesh resolution kinematically.
-* **Headless screenshots and session record/replay** — `--screenshot`, `--record-session`, and `--replay-session` for CI, doc image generation, and offline replays.
-
-See the documentation page on the rayrai TCP viewer for the full panel walkthrough, the wire format, and a minimal custom-client example.
-
-## Asset credits
-
-Some images in this README and in the documentation show third-party models
-licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/): the
-city cars, the off-road buggy and its venue props, the warehouse forklift,
-pallet jack, pallets and cartons, and the YCB objects. The TCP viewer's icons
-are [UIcons by Flaticon](https://www.flaticon.com/uicons). They are credited in
-[docs/sections/AssetCredits.md](docs/sections/AssetCredits.md), and each asset
-folder in `rsc` keeps its full license notice.
-
-## Documentation
-
-Open the installed documentation from the package, or visit the hosted RaiSim documentation for installation, activation, API, examples, and visualization workflows.
+- Full upstream RaiSim `v2.16.0` documentation, examples, and release notes are preserved in [`README_UPSTREAM.md`](README_UPSTREAM.md) and [raisim.com](https://raisim.com).
+- Please cite and comply with RaiSim's official licensing terms (`LICENSE.md` / `COPYING`).

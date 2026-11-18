@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "raisim-fast"
+version = "2.16.0"
+description = "Raisim2_FAST: High-Throughput Vectorized OpenMP C++20 Engine & Analytical Primitive MJCF-to-URDF Compiler for RaiSim 2.16+"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+mujoco = ["mujoco>=3.1.0"]
+torch = ["torch>=2.1.0"]
+
+[tool.setuptools.packages.find]
+where = ["python"]

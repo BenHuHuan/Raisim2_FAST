@@ -68,3 +68,11 @@ docs/.vitepress/dist/
 docs/api/
 # Temporary siblings that generate_api_docs.py renames into place
 docs/.api.*/
+
+# Local install prefixes, build artifacts, and Python packaging caches
+/install/
+/activate_env.sh
+*.egg-info/
+**/.pytest_cache/
+raisimFast/build*/
+raisimFast/dist/

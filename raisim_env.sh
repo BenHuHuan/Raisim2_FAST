@@ -80,21 +80,45 @@ __raisim_prepend_package_lib() {
 
   if [[ -d "${legacy_lib}" ]]; then
     __raisim_prepend_path "${__raisim_lib_var}" "${legacy_lib}"
+    if [[ -d "${legacy_lib}/openusd" ]]; then
+      __raisim_prepend_path "${__raisim_lib_var}" "${legacy_lib}/openusd"
+    fi
   elif [[ -d "${flat_lib}" ]]; then
     __raisim_prepend_path "${__raisim_lib_var}" "${flat_lib}"
+    if [[ -d "${flat_lib}/openusd" ]]; then
+      __raisim_prepend_path "${__raisim_lib_var}" "${flat_lib}/openusd"
+    fi
   fi
 }
 
 __raisim_prepend_package_lib "raisim"
 __raisim_prepend_package_lib "rayrai"
 
-# raisimpy built from this checkout. Added even before the first build so the
-# same shell can import it afterwards; set RAISIMPY_BUILD_DIR for other trees.
+# Sanitize mismatched /opt/ros Python entries when active Python major.minor differs.
+__raisim_python="$(command -v python3 || command -v python)"
+if [[ -n "${__raisim_python}" && -n "${PYTHONPATH:-}" ]]; then
+  export PYTHONPATH="$("${__raisim_python}" - <<'EOF'
+import os, sys
+cur_tag = f"python{sys.version_info.major}.{sys.version_info.minor}"
+kept = []
+for entry in os.environ.get("PYTHONPATH", "").split(":"):
+    if not entry:
+        continue
+    if "/opt/ros/" in entry and "python" in entry and cur_tag not in entry:
+        continue
+    kept.append(entry)
+print(":".join(kept))
+EOF
+)"
+fi
+
+# raisimpy and raisim_fast built from this checkout.
 __raisim_py_dir="${RAISIMPY_BUILD_DIR:-${RAISIM_DIR}/build-py/raisimPy}"
 __raisim_prepend_path "PYTHONPATH" "${__raisim_py_dir}"
-
-# Python silently skips extensions built for another version; name the mismatch.
-__raisim_python="$(command -v python3 || command -v python)"
+if [[ -d "${RAISIM_DIR}/raisimFast/python" ]]; then
+  __raisim_prepend_path "PYTHONPATH" "${RAISIM_DIR}/raisimFast/python"
+fi
+export RAISIM_FAST_LIB_DIR="${RAISIM_FAST_LIB_DIR:-${RAISIM_DIR}/build-py/raisimFast}"
 if [[ -n "${__raisim_python}" && -d "${__raisim_py_dir}" ]]; then
   "${__raisim_python}" - "${__raisim_py_dir}" <<'EOF'
 import importlib.machinery, pathlib, sys
