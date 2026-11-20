@@ -15,10 +15,17 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Sequence
+from typing import Literal, Sequence
 import xml.etree.ElementTree as ET
 
 import numpy as np
+
+from .tiangong_capsule_collision import (
+    TIANGONG3_CAPSULE_EXTRA_EXCLUDES,
+    TIANGONG3_CAPSULE_PROFILE_VERSION,
+    emit_tiangong3_capsule_urdf_collisions,
+    is_tiangong3_body_set,
+)
 
 
 def _quat_wxyz_to_mat(q: np.ndarray) -> np.ndarray:
@@ -194,9 +201,20 @@ def compile_mjcf_to_analytical_urdf(
     anchor_body_name: str | None = None,
     extra_excludes: Sequence[tuple[str, str]] = (),
     robot_name: str = "mjcf_robot",
+    collision_profile: Literal["auto", "aabb", "tiangong_capsule"] = "auto",
 ) -> dict:
-    """Directly compile ANY `mujoco.MjModel` robot into a Raisim2_FAST analytical-primitive URDF + metadata."""
+    """Directly compile ANY `mujoco.MjModel` robot into a Raisim2_FAST analytical-primitive URDF + metadata.
+
+    When ``collision_profile="auto"`` (default), Tiangong3 models (``tiangong3_v2_29_head_fixed``)
+    automatically use the Sim2Real-calibrated ``tiangong3_capsule_v1`` analytic capsule/sphere
+    profile (matching ``MLAB4_Fast`` for exact GPU+CPU dual-simulator contact parity), while
+    other robots use AABB-fitted analytical primitives. Pass ``collision_profile="aabb"`` to force
+    the legacy AABB fitter or ``"tiangong_capsule"`` to explicitly require Tiangong3 capsule primitives.
+    """
     import mujoco
+
+    if collision_profile not in ("auto", "aabb", "tiangong_capsule"):
+        raise ValueError(f"Unsupported collision_profile: {collision_profile!r}")
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -259,6 +277,19 @@ def compile_mjcf_to_analytical_urdf(
     else:
         anchor_body_name = _strip_prefix(anchor_body_name, entity_prefix)
 
+    subtree_clean_names = {clean_bname(bid) for bid in subtree_bids}
+    is_tiangong3 = is_tiangong3_body_set(subtree_clean_names)
+    if collision_profile == "tiangong_capsule" and not is_tiangong3:
+        raise ValueError(
+            "collision_profile='tiangong_capsule' requires a Tiangong3 body tree "
+            "(pelvis, waist_pitch_link, ankle_roll_l/r_link, left/right_tcp_link)"
+        )
+    use_tiangong_capsule = (
+        collision_profile == "tiangong_capsule"
+        or (collision_profile == "auto" and is_tiangong3)
+    )
+    resolved_collision_profile = TIANGONG3_CAPSULE_PROFILE_VERSION if use_tiangong_capsule else "aabb"
+
     urdf_root = ET.Element("robot", name=robot_name)
     joint_names: list[str] = []
     armatures: list[float] = []
@@ -304,48 +335,51 @@ def compile_mjcf_to_analytical_urdf(
             )
 
         # Collision geometries on this body
-        gadr = int(mj_model.body_geomadr[bid])
-        gnum = int(mj_model.body_geomnum[bid])
-        mesh_pts_in_body: list[np.ndarray] = []
+        if use_tiangong_capsule:
+            total_primitives += emit_tiangong3_capsule_urdf_collisions(link_el, lname)
+        else:
+            gadr = int(mj_model.body_geomadr[bid])
+            gnum = int(mj_model.body_geomnum[bid])
+            mesh_pts_in_body: list[np.ndarray] = []
 
-        for g_off in range(gnum):
-            gid = gadr + g_off
-            if int(mj_model.geom_contype[gid]) == 0 and int(mj_model.geom_conaffinity[gid]) == 0:
-                continue
-            gtype = int(mj_model.geom_type[gid])
-            gpos = np.asarray(mj_model.geom_pos[gid], dtype=np.float64)
-            gquat = np.asarray(mj_model.geom_quat[gid], dtype=np.float64)
-            grpy = _quat_wxyz_to_rpy(gquat)
-            gsize = np.asarray(mj_model.geom_size[gid], dtype=np.float64)
+            for g_off in range(gnum):
+                gid = gadr + g_off
+                if int(mj_model.geom_contype[gid]) == 0 and int(mj_model.geom_conaffinity[gid]) == 0:
+                    continue
+                gtype = int(mj_model.geom_type[gid])
+                gpos = np.asarray(mj_model.geom_pos[gid], dtype=np.float64)
+                gquat = np.asarray(mj_model.geom_quat[gid], dtype=np.float64)
+                grpy = _quat_wxyz_to_rpy(gquat)
+                gsize = np.asarray(mj_model.geom_size[gid], dtype=np.float64)
 
-            if gtype == int(mujoco.mjtGeom.mjGEOM_SPHERE):
-                _add_primitive_collision(link_el, "sphere", gpos, grpy, radius=float(gsize[0]))
-                total_primitives += 1
-            elif gtype == int(mujoco.mjtGeom.mjGEOM_CAPSULE):
-                _add_primitive_collision(
-                    link_el, "capsule", gpos, grpy, radius=float(gsize[0]), length=float(2.0 * gsize[1])
+                if gtype == int(mujoco.mjtGeom.mjGEOM_SPHERE):
+                    _add_primitive_collision(link_el, "sphere", gpos, grpy, radius=float(gsize[0]))
+                    total_primitives += 1
+                elif gtype == int(mujoco.mjtGeom.mjGEOM_CAPSULE):
+                    _add_primitive_collision(
+                        link_el, "capsule", gpos, grpy, radius=float(gsize[0]), length=float(2.0 * gsize[1])
+                    )
+                    total_primitives += 1
+                elif gtype == int(mujoco.mjtGeom.mjGEOM_CYLINDER):
+                    _add_primitive_collision(
+                        link_el, "cylinder", gpos, grpy, radius=float(gsize[0]), length=float(2.0 * gsize[1])
+                    )
+                    total_primitives += 1
+                elif gtype == int(mujoco.mjtGeom.mjGEOM_BOX):
+                    _add_primitive_collision(link_el, "box", gpos, grpy, size=tuple(2.0 * gsize[:3]))
+                    total_primitives += 1
+                elif gtype == int(mujoco.mjtGeom.mjGEOM_MESH):
+                    mid = int(mj_model.geom_dataid[gid])
+                    if mid >= 0 and mid in mesh_verts_cache:
+                        R_g = _quat_wxyz_to_mat(gquat)
+                        pts_b = (mesh_verts_cache[mid] @ R_g.T) + gpos
+                        mesh_pts_in_body.append(pts_b)
+
+            if mesh_pts_in_body:
+                all_pts = np.vstack(mesh_pts_in_body)
+                total_primitives += fit_analytical_primitive_from_aabb(
+                    link_el, lname, all_pts.min(axis=0), all_pts.max(axis=0), is_foot=(lname in foot_set)
                 )
-                total_primitives += 1
-            elif gtype == int(mujoco.mjtGeom.mjGEOM_CYLINDER):
-                _add_primitive_collision(
-                    link_el, "cylinder", gpos, grpy, radius=float(gsize[0]), length=float(2.0 * gsize[1])
-                )
-                total_primitives += 1
-            elif gtype == int(mujoco.mjtGeom.mjGEOM_BOX):
-                _add_primitive_collision(link_el, "box", gpos, grpy, size=tuple(2.0 * gsize[:3]))
-                total_primitives += 1
-            elif gtype == int(mujoco.mjtGeom.mjGEOM_MESH):
-                mid = int(mj_model.geom_dataid[gid])
-                if mid >= 0 and mid in mesh_verts_cache:
-                    R_g = _quat_wxyz_to_mat(gquat)
-                    pts_b = (mesh_verts_cache[mid] @ R_g.T) + gpos
-                    mesh_pts_in_body.append(pts_b)
-
-        if mesh_pts_in_body:
-            all_pts = np.vstack(mesh_pts_in_body)
-            total_primitives += fit_analytical_primitive_from_aabb(
-                link_el, lname, all_pts.min(axis=0), all_pts.max(axis=0), is_foot=(lname in foot_set)
-            )
 
         if bid == root_bid:
             continue
@@ -450,6 +484,12 @@ def compile_mjcf_to_analytical_urdf(
             pair = [clean_bname(b1), clean_bname(b2)]
             if pair not in excludes and [pair[1], pair[0]] not in excludes:
                 excludes.append(pair)
+    if use_tiangong_capsule:
+        for a, b in TIANGONG3_CAPSULE_EXTRA_EXCLUDES:
+            if a in subtree_clean_names and b in subtree_clean_names:
+                pair = [a, b]
+                if pair not in excludes and [b, a] not in excludes:
+                    excludes.append(pair)
     for a, b in extra_excludes:
         pair = [_strip_prefix(a, entity_prefix), _strip_prefix(b, entity_prefix)]
         if pair not in excludes and [pair[1], pair[0]] not in excludes:
@@ -478,6 +518,7 @@ def compile_mjcf_to_analytical_urdf(
         "nominal_armature": armatures,
         "nominal_damping": dampings,
         "nominal_frictionloss": frictions,
+        "collision_profile": resolved_collision_profile,
         "total_analytical_primitives": total_primitives,
     }
     (out_dir / "raisim_fast_meta.json").write_text(json.dumps(meta, indent=2) + "\n")
